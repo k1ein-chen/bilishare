@@ -5,11 +5,19 @@ B站评论 LLM 情感分类器
 import json, os, httpx, time, sys
 from collections import Counter, defaultdict
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8")
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+analysis_dir = os.path.join(BASE_DIR, "comments", "analysis")
+
 # ====== 配置 ======
 # 推荐使用 DeepSeek API：https://platform.deepseek.com → 创建 API Key
 # 火山引擎 Ark Coding Plan 也兼容，API_URL 替换为：
 #   https://ark.cn-beijing.volces.com/api/coding/v1/chat/completions
-API_KEY = os.environ.get("DEEPSEEK_API_KEY", "your_api_key_here")
+API_KEY = os.environ.get("DEEPSEEK_API_KEY", "your_api_key_here").strip()
 MODEL = "deepseek-chat"  # DeepSeek 官方 API 的模型名
 API_URL = "https://api.deepseek.com/chat/completions"
 
@@ -20,14 +28,31 @@ API_URL = "https://api.deepseek.com/chat/completions"
 BATCH_SIZE = 40   # 每批条数
 SLEEP_BETWEEN = 3  # 批次间隔(秒)
 
+if not API_KEY or API_KEY == "your_api_key_here":
+    print(
+        "[ERROR] 未检测到有效的 DEEPSEEK_API_KEY 环境变量！\n"
+        "  • 若在 Agent (WorkBuddy / Claude Code / Antigravity) 中使用，请直接采用免 API Key 的切块模式（见 SKILL.md）。\n"
+        "  • 若需运行本脚本调用外部 API，请先设置: export DEEPSEEK_API_KEY='sk-...'",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
 HEADERS = {
     "Authorization": f"Bearer {API_KEY}",
     "Content-Type": "application/json",
 }
 
 # ====== 加载数据 ======
-with open("comments/analysis/all_comments_combined.json", "r", encoding="utf-8") as f:
+combined_path = os.path.join(analysis_dir, "all_comments_combined.json")
+if not os.path.exists(combined_path):
+    print("[ERROR] 未找到 comments/analysis/all_comments_combined.json，请先运行 python prepare_comments.py", file=sys.stderr)
+    sys.exit(1)
+
+with open(combined_path, "r", encoding="utf-8") as f:
     comments = json.load(f)
+if not comments:
+    print("[ERROR] all_comments_combined.json 为空，无评论可分类。", file=sys.stderr)
+    sys.exit(1)
 print(f"总评论数: {len(comments)}")
 
 # ====== 批量分类 ======
@@ -132,7 +157,7 @@ for i in range(0, len(comments), BATCH_SIZE):
 
     # 保存进度
     if batch_num % 5 == 0:
-        with open("comments/analysis/classify_progress.json", "w", encoding="utf-8") as f:
+        with open(os.path.join(analysis_dir, "classify_progress.json"), "w", encoding="utf-8") as f:
             json.dump(all_results, f, ensure_ascii=False)
 
     print(f"  -> 累计完成: {len(all_results)}/{len(comments)}", file=sys.stderr)
@@ -145,10 +170,16 @@ for c in comments:
     cid = c["id"]
     if cid in all_results:
         c["sentiment"] = all_results[cid]["sentiment"]
+        c["category"] = all_results[cid]["topic"]
         c["topic"] = all_results[cid]["topic"]
+        c["point"] = ""
+        c["is_water"] = False
     else:
         c["sentiment"] = "neutral"
+        c["category"] = "其他"
         c["topic"] = "其他"
+        c["point"] = ""
+        c["is_water"] = False
 
 # ====== 统计 ======
 total = len(comments)
@@ -175,7 +206,7 @@ for sentiment, label in [("positive","好评"), ("neutral","中评"), ("negative
         print(f"  {topic}: {count}条 ({count/total*100:.1f}%)")
 
 # ====== 保存 ======
-with open("comments/analysis/classified_llm.json", "w", encoding="utf-8") as f:
+with open(os.path.join(analysis_dir, "classified_llm.json"), "w", encoding="utf-8") as f:
     json.dump(comments, f, ensure_ascii=False, indent=2)
 print(f"\n已保存: comments/analysis/classified_llm.json")
 
@@ -211,6 +242,6 @@ for label, c_list, icon in [("👍 好评", pos, "👍"), ("👎 差评", neg, "
         lines.append(f"  -> ({src_label}) {src_title}")
         lines.append("")
 
-with open("comments/analysis/llm_report.txt", "w", encoding="utf-8") as f:
+with open(os.path.join(analysis_dir, "llm_report.txt"), "w", encoding="utf-8") as f:
     f.write("\n".join(lines))
 print(f"已保存: comments/analysis/llm_report.txt")

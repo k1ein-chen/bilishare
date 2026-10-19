@@ -1,6 +1,6 @@
-# BiliShare — B站评论区抓取与情感分析工具
+# BiliShare — B站评论区抓取与情感分析 Skill / 工具链
 
-一个 Python 工具链，用于批量抓取 B 站视频评论区，并通过 LLM API 进行情感分类（好评/中评/差评）和主题分析，一键生成舆情报告。
+一个轻量通用的 B 站视频评论区抓取与舆情分析工具。**无需额外购买外部 LLM API Key**，可直接作为 Agent Skill 在 **WorkBuddy / Claude Code / Antigravity / Cursor** 中复用宿主自带 Token 额度完成情感分类（好评/中评/差评）、具体观点提炼与高赞原话统计（同时也保留外部 API Key 脚本供纯命令行跑批）。
 
 ## 目录
 
@@ -21,25 +21,24 @@
 
 ## 功能
 
-- ✅ **批量爬取** B 站视频评论（含楼中楼子回复）
-- ✅ **全量覆盖**：同时抓取热度排序 + 时间排序的评论，去重合并
-- ✅ **LLM 情感分类**：调用 DeepSeek API 识别好评/中评/差评 + 主题归类
-- ✅ **自动出报告**：统计占比、原文引用、来源标注、主题分布
-- ✅ **覆盖率验证**：对比 API 显示总评论数和实际抓取数
-- ✅ 爬虫频率控制和 429 限流自动重试
+- ✅ **零 API Key 开箱即用**：基于「短序号切块 + 指针聚类」协议，单块输出仅 ~400 Tokens，直接在 WorkBuddy / Claude Code / Antigravity 内用宿主额度跑通，不惧小窗口与输出截断
+- ✅ **批量全量爬取**：同时抓取 B 站视频**热度排序 + 时间排序**主评论及**楼中楼子回复**，自动去重合并
+- ✅ **主题 + 具体槽点双层提炼**：不仅统计 9 大主题负面率，还直接提炼每个主题下的具体玩家观点与条数
+- ✅ **高赞防漏校验**：自动标记并校验 $\ge 10$ 赞热评覆盖率，确保核心热评 100% 不遗漏
+- ✅ **双模兼容**：同时保留 `llm_classifier.py`，支持在无 Agent 环境下配置 DeepSeek / 火山引擎 API Key 独立跑批
 
 ## 全景视图
 
 ```
-┌─────────────┐    ┌──────────────┐    ┌───────────────┐    ┌──────────────┐
-│ ① 爬取评论   │ -> │ ② 合并数据    │ -> │ ③ LLM 分类    │ -> │ ④ 查看报告   │
-│ batch_scraper│    │ prepare_     │    │ llm_          │    │ llm_report   │
-│ .py          │    │ comments.py  │    │ classifier.py │    │ .txt         │
-├─────────────┤    ├──────────────┤    ├───────────────┤    ├──────────────┤
-│ B站内部 API  │    │ 多个视频 JSON │    │ DeepSeek API  │    │ 情感占比      │
-│ + SESSDATA   │    │ → 扁平数组    │    │ 好评/中评/差评  │    │ 主题分布      │
-│ → JSON 文件  │    │ → one JSON   │    │ + 主题归类     │    │ 原话引用      │
-└─────────────┘    └──────────────┘    └───────────────┘    └──────────────┘
+┌───────────────┐    ┌──────────────────┐    ┌───────────────────┐    ┌──────────────────┐
+│ ① 爬取评论     │ -> │ ② 合并与指针切块  │ -> │ ③ Agent 观点聚类   │ -> │ ④ 水化还原出报告  │
+│ batch_scraper │    │ prepare_         │    │ 宿主 Agent 免 Key  │    │ generate_report  │
+│ .py           │    │ comments.py      │    │ (或 llm_classifier)│    │ .py              │
+├───────────────┤    ├──────────────────┤    ├───────────────────┤    ├──────────────────┤
+│ B站内部 API    │    │ 合并全量 JSON +   │    │ 合并同类项输出      │    │ 情感占比 / 水评比 │
+│ + SESSDATA    │    │ 300条/块短序号切块│    │ 观点 + 序号数组     │    │ 主题与具体槽点    │
+│ → JSON 文件    │    │ → chunks/*.txt   │    │ → results/*.json  │    │ 高赞原话 Top 15   │
+└───────────────┘    └──────────────────┘    └───────────────────┘    └──────────────────┘
 ```
 
 ## 环境要求
@@ -49,47 +48,34 @@
 
 ## 快速开始
 
-### Agent 环境（推荐）
+### 方式一：Agent 环境免 API Key 模式（推荐，支持 WorkBuddy / Claude Code / Antigravity）
 
-在 Claude Code / 方舟 / 任意 Agent 中，把 `bilishare/` 文件夹放入项目目录，然后告诉 Agent：
+把 `bilishare/` 放入工作目录（或 `skills/` 目录），直接对 Agent 说：
 
 > "帮我用 bilishare 抓取并分析这几个视频的评论：BV1xx BV2xx ..."
 
-Agent 会引导你提供 SESSDATA 和 API Key，然后自动完成初始化→爬取→分类→出报告全流程。
+Agent 会按 [`SKILL.md`](./SKILL.md) 引导你提供 **B站 `SESSDATA`**（无需任何大模型 API Key），自动完成：
+1. `python batch_scraper.py BV1xx ...`（爬取评论）
+2. `python check_stats.py && python prepare_comments.py`（检查覆盖率并生成 `chunks/chunk_XX.txt` 短序号切块）
+3. Agent 自身（或并发派发 Subagent）读取切块并输出指针聚类结果到 `comments/analysis/results/`
+4. `python generate_report.py`（还原指针、校验高赞防漏并生成 `comments/analysis/llm_report.txt`）
 
-如果你想手动操作：
-```bash
-pip install httpx
-export BILI_SESSDATA="..." DEEPSEEK_API_KEY="sk-..."
-python batch_scraper.py BV1xx BV2xx ...           # 爬取
-python check_stats.py && python prepare_comments.py && python llm_classifier.py  # 检查→合并→分类
-```
+### 方式二：纯命令行 + 外部 API Key 模式（备选）
 
-### 普通命令行
+如果你不在 Agent 环境中，或者希望用外部 API Key 后台挂机跑上万条评论：
 
 ```bash
-# 1. 把 bilishare 文件夹放到工作目录，进入
 cd bilishare
-
-# 2. 安装依赖
 pip install httpx
-
-# 3. 配置环境变量
 export BILI_SESSDATA="..."
 export DEEPSEEK_API_KEY="sk-..."
 
-# 4. 爬取评论
 python batch_scraper.py <BV号1> <BV号2> ...
-
-# 5. 检查覆盖率（API 显示的评论数 vs 实际抓到数）
 python check_stats.py
-
-# 6. 合并 → 分类
 python prepare_comments.py && python llm_classifier.py
-
-# 7. 查看报告
 cat comments/analysis/llm_report.txt
 ```
+
 
 ---
 
@@ -98,7 +84,8 @@ cat comments/analysis/llm_report.txt
 ### Step 1：爬取评论
 
 ```bash
-python batch_scraper.py <BV号1> <BV号2> <BV号3> ...
+python batch_scraper.py <BV号1> <BV号2> ...              # 默认存入 comments/players/
+python batch_scraper.py --official <官方视频BV号> ...     # 可选：加 --official 存入 comments/official/
 ```
 
 > 💡 **BV 号太多？** 在 B站搜索结果/UP主主页/合集页面，用以下浏览器插件可以一键批量复制所有视频链接，然后手动提取 BV 号：
@@ -110,28 +97,27 @@ python batch_scraper.py <BV号1> <BV号2> <BV号3> ...
 - 每个视频拉取两遍评论：**热度排序** + **时间排序**，然后去重（确保不遗漏）
 - 每遍最多翻 50 页（每页 20 条），B站 API 返回完会自动停止
 - 对有回复的顶级评论，逐条展开拉取**楼中楼子回复**（最多 5 页）
-- 按 `rpid` 去重后输出 JSON
+- 按 `rpid` 去重后输出 JSON 到 `comments/players/` 或 `comments/official/`
 
-> 实际拉取量取决于视频评论数。以弧光猎人官方视频（1,522 条评论）为例：最终拿到 **737 条顶级评论 + 747 条子回复 = 1,484 条**（覆盖率 97.5%）
-- 输出 JSON 文件到 `comments/players/` 或 `comments/official/`
+> 实际拉取量取决于视频评论数。以某官方实机视频（1,522 条评论）为例：最终拿到 **737 条顶级评论 + 747 条子回复 = 1,484 条**（覆盖率 97.5%）
 
 **验证爬取覆盖率：**
 ```bash
 python check_stats.py
 ```
 
-### Step 2：合并数据
+### Step 2：合并数据与生成短序号切块
 
 ```bash
 python prepare_comments.py
 ```
-将所有视频的评论 JSON 合并为一个扁平数组，输出到 `comments/analysis/all_comments_combined.json`
+1. 将所有视频的评论 JSON 合并为 `comments/analysis/all_comments_combined.json`；
+2. 按 **300 条 / 12,000 字** 自动切分生成 `comments/analysis/chunks/chunk_01.txt ~ chunk_NN.txt` 及映射清单 `manifest.json`（同时自动清理旧切块与旧结果）。
 
-### Step 3：LLM 情感分类
+### Step 3：情感分类与观点提炼
 
-```bash
-python llm_classifier.py
-```
+- **方式 A（推荐，免 API Key）**：由宿主 Agent（WorkBuddy / Claude Code / Antigravity）按 [`SKILL.md`](./SKILL.md) 规范读取 `comments/analysis/chunks/chunk_*.txt`，合并同类观点输出局部序号数组至 `comments/analysis/results/chunk_XX_result.json`。
+- **方式 B（备选，外部 API Key）**：运行 `python llm_classifier.py` 调用外部 DeepSeek / 火山引擎 API 逐批分类。
 
 **分类规则：**
 
@@ -141,31 +127,25 @@ python llm_classifier.py
 | ➖ 中评 | 客观讨论、提问、建议、一般反馈 | "问下这个配置够不够" |
 | 👎 差评 | 批评、不满、吐槽bug/卡顿/服务器 | "一小时了都没进去" |
 
-**主题归类：** 性能优化、游戏性、运营活动、匹配/社交、国服对比、收费/氪金、画质/音效、期待/建议、其他
+**一级主题（9 大固定分类）：** `性能优化`、`游戏性`、`运营活动`、`匹配/社交`、`国服对比`、`收费/氪金`、`画质/音效`、`期待/建议`、`其他`
 
-LLM 会识别反讽、游戏黑话（如 "太好玩了，一小时了都没进去" → 差评）。
+### Step 4：生成并查看报告
 
-**耗时参考：**
-| 评论量 | 批次 | 耗时 |
-|:-----:|:----:|:---:|
-| 2,000 | ~50批 | ~2-3分钟 |
-| 10,000 | ~250批 | ~12-15分钟 |
+```bash
+python generate_report.py
+```
 
-### Step 4：查看报告
-
-运行分类后自动生成：
+自动生成：
 ```
 comments/analysis/
-├── classified_llm.json        ← 全量数据+每条评论的 sentiment/topic 标签
-└── llm_report.txt             ← 可读报告
+├── classified_llm.json        ← 全量数据 + 每条评论的 sentiment/category/point 标签
+└── llm_report.txt             ← 可读舆情报告
 ```
 
 报告包含：
-- **总体概览**：好评/中评/差评占比
-- **主题负面率排行**：按差评率从高到低
-- **好评 Top 15**：按点赞排序 + 原话引用 + 来源
-- **差评 Top 15**
-- **中评 Top 15**
+- **总体概览**：实质观点评论 vs 日常互动水评占比，以及好评/中评/差评占比
+- **主题负面率排行与核心观点明细**：按主题统计好评/差评率，并列出每个主题下的具体槽点（`point`）与条数
+- **好评 / 差评 / 中评 高赞原话 Top 15**：按点赞排序 + 原话引用 + 视频来源
 
 ---
 
@@ -183,23 +163,22 @@ comments/analysis/
    export BILI_SESSDATA="你的SESSDATA值"
    ```
 
-### ② AI API Key（必填，二选一）
+### ② 外部 AI API Key（可选，仅在使用 `llm_classifier.py` 时需要）
 
-#### 推荐：DeepSeek 官方 API（性价比高）
+> 在 WorkBuddy / Claude Code / Antigravity 等 Agent 环境中默认使用宿主自带额度，**无需配置此项**。
 
-- 价格：￥1/百万 token（输入），￥2/百万 token（输出）
-- 2000 条评论分类成本约 **￥0.5-1**
+#### DeepSeek 官方 API（性价比高）
+
+- 价格：￥1/百万 token（输入），￥2/百万 token（输出），2000 条评论约 **￥0.5-1**
 - 注册：https://platform.deepseek.com → 创建 API Key
 
 ```bash
 export DEEPSEEK_API_KEY="sk-xxxxx"
 ```
 
-脚本默认使用 DeepSeek 官方 API（`https://api.deepseek.com`）。
+#### 火山引擎 Ark
 
-#### 备选：火山引擎 Ark
-
-如果你有火山引擎 Coding Plan，替换 `llm_classifier.py` 中的配置：
+如果你有火山引擎 Coding Plan，可替换 `llm_classifier.py` 中的配置：
 ```python
 API_URL = "https://ark.cn-beijing.volces.com/api/coding/v1/chat/completions"
 MODEL = "deepseek-v4-flash"
@@ -211,21 +190,25 @@ MODEL = "deepseek-v4-flash"
 
 ```
 bilishare/
-├── batch_scraper.py               ← ① 批量爬取评论
-├── prepare_comments.py            ← ② 合并数据
-├── llm_classifier.py              ← ③ LLM 情感分类
+├── SKILL.md                       ← Agent Skill 指针切块协议规范（主入口）
+├── CLAUDE.md                      ← Agent 引导说明
+├── batch_scraper.py               ← ① 批量爬取评论（支持 --official）
 ├── check_stats.py                 ← 验证爬取覆盖率
-├── generate_report.py             ← 生成报告
-├── CLAUDE.md                      ← Agent 使用说明
+├── prepare_comments.py            ← ② 合并数据并生成 300条/块 短序号切块
+├── generate_report.py             ← ④ 指针还原、高赞防漏校验与生成报告
+├── llm_classifier.py              ← （可选）使用外部 API Key 逐批分类
 ├── README.md                      ← 本文档
-├── SOP_B站评论抓取与分析.md        ← 详细 SOP + 异常排查
-├── comments/
-│   ├── official/                  ← 官方视频评论 JSON（手动/自动放置）
-│   ├── players/                   ← 玩家视频评论 JSON
-│   └── analysis/                  ← 分析结果（自动生成）
-│       ├── all_comments_combined.json
-│       ├── classified_llm.json
-│       └── llm_report.txt
+├── SOP_B站评论抓取与分析.md        ← 详细 SOP + 异常排查索引
+└── comments/                      ← 运行时数据目录（自动创建）
+    ├── official/                  ← 官方视频评论 JSON
+    ├── players/                   ← 玩家视频评论 JSON
+    └── analysis/                  ← 分析产物
+        ├── stats_report.txt
+        ├── all_comments_combined.json
+        ├── chunks/                ← 短序号切块 chunk_XX.txt 与 manifest.json
+        ├── results/               ← Agent 输出的 chunk_XX_result.json
+        ├── classified_llm.json
+        └── llm_report.txt
 ```
 
 ---
