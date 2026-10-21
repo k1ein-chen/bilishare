@@ -68,18 +68,21 @@ print(f\"{d['bvid']} | {d['stat']['view']}次 | {d['stat']['reply']}评论 | {t}
 ```bash
 python batch_scraper.py BV1xx BV2xx ...              # 玩家/UP主视频 → 自动存入 comments/players/
 python batch_scraper.py --official BV3xx ...         # 官方视频 → 自动存入 comments/official/
+python batch_scraper.py --compare BV1xx              # 可选：Legacy 与 WBI 双引擎同台对比测试
 ```
-- 支持传入多个 BV 号，按顺序逐个爬取
-- 每个视频：先爬热度排序 + 时间排序主评论 → 去重 → 再爬楼中楼子回复
+- 支持传入多个 `BV号` 或完整 B 站视频链接，按顺序逐个爬取
+- 默认采用 **WBI 动态签名引擎**（异常自动降级 Legacy），单趟最多翻 `250` 页主评论；若第 1 趟（热门排序）已见底（`is_end=True`）则自动免跑第 2 趟（时间排序）
+- 楼中楼子回复优先复用主评论内联数据（省去 ~60% 请求），超出部分按需拉取并提前刹车
 - 自动创建并保存到 `comments/players/` 或 `comments/official/`
 
 ### 关键代码流程
 ```
-get_video_info()         → 获取视频元信息（标题/播放量/AID）
-get_top_comments()       → 爬取顶级评论（分页，最多50页×20条=1000条）
-get_sub_replies()        → 爬取每条热评的子回复（最多5页）
-合并去重                 → 按 rpid 去重
-保存 JSON                → {video, top_level_count, sub_reply_count, total_count, comments}
+get_video_info()            → 获取视频元信息（标题/播放量/AID）
+get_top_comments_wbi()      → WBI 签名游标爬取顶级评论（默认最高250页×20条=5000条主评论，含置顶评论）
+get_top_comments_legacy()   → 备用旧版主评论引擎（支持 --engine legacy 或自动降级）
+get_sub_replies()           → 内联子回复免请求复用 + 超出楼层分页拉取（最高15页/楼，不满20条即停）
+run_scrape_pipeline()       → 智能单/双趟调度、按 rpid 去重并统计请求与覆盖率指标
+保存 JSON                   → {video, engine, top_level_count, sub_reply_count, total_count, comments}
 ```
 
 ### 验证覆盖率

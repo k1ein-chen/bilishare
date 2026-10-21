@@ -84,22 +84,23 @@ cat comments/analysis/llm_report.txt
 ### Step 1：爬取评论
 
 ```bash
-python batch_scraper.py <BV号1> <BV号2> ...              # 默认存入 comments/players/
+python batch_scraper.py <BV号或B站视频链接> ...            # 默认存入 comments/players/（采用 WBI 签名引擎）
 python batch_scraper.py --official <官方视频BV号> ...     # 可选：加 --official 存入 comments/official/
+python batch_scraper.py --engine legacy <BV号> ...        # 可选：切换旧版 legacy 接口引擎
+python batch_scraper.py --compare <BV号>                  # 可选：双引擎（Legacy vs WBI）同台跑分对比
 ```
 
-> 💡 **BV 号太多？** 在 B站搜索结果/UP主主页/合集页面，用以下浏览器插件可以一键批量复制所有视频链接，然后手动提取 BV 号：
+> 💡 **支持直接粘贴完整视频 URL**：脚本会自动从中正则提取 `BV号`。若需批量抓取多个视频，在 B站搜索结果/UP主主页可用以下插件一键导出 URL：
 > - **Chrome 推荐**：[TabCopy](https://chromewebstore.google.com/detail/tabcopy)（复制所有打开标签页的 URL）
 > - **批量提取链接**：[Link Grabber](https://chromewebstore.google.com/detail/link-grabber)（一键抓取页面所有链接，支持过滤 B站视频 URL）
-> - **通用方案**：`Ctrl/⌘ + 点击` 依次打开视频 → TabCopy 导出所有 URL → 用正则 `BV[a-zA-Z0-9]{10}` 提取 BV 号
+> - **通用方案**：`Ctrl/⌘ + 点击` 依次打开视频 → TabCopy 导出所有 URL → 直接作为参数传给 `batch_scraper.py`
 
-**工作原理：**
-- 每个视频拉取两遍评论：**热度排序** + **时间排序**，然后去重（确保不遗漏）
-- 每遍最多翻 50 页（每页 20 条），B站 API 返回完会自动停止
-- 对有回复的顶级评论，逐条展开拉取**楼中楼子回复**（最多 5 页）
-- 按 `rpid` 去重后输出 JSON 到 `comments/players/` 或 `comments/official/`
+**工作原理（详见 [`BENCHMARK_评论抓取双引擎实测报告.md`](./BENCHMARK_评论抓取双引擎实测报告.md)）：**
+- **WBI + Legacy 双引擎热备**：默认采用新版 `/x/v2/reply/wbi/main` 动态签名游标翻页（单趟默认上限 `250` 页 ≈ 5,000 条主评论），异常时自动无缝降级至 `legacy` 接口。
+- **单/双趟智能自适应**：第 1 趟（热门排序）若已自然见底（`is_end=True`），自动免跑第 2 趟（时间排序）；仅在超大视频超出单趟页数上限时启动第 2 趟互补并按 `rpid` 去重。
+- **内联子回复零请求直取**：主评论自带的子回复已满足 `rcount` 时直接复用（省去约 60% 的楼中楼 HTTP 请求）；超出部分按需请求 `/x/v2/reply/reply`（最高 `15` 页/楼，不满 20 条立即停止）。
 
-> 实际拉取量取决于视频评论数。以某官方实机视频（1,522 条评论）为例：最终拿到 **737 条顶级评论 + 747 条子回复 = 1,484 条**（覆盖率 97.5%）
+> **实测覆盖率**：中小型视频（1,522 条评论）实抓 **1,484 条（覆盖率 97.5%）**；近万评热门视频（9,632 条评论）仅需 2.7 分钟、664 次请求即可实抓 **9,328 条（覆盖率 96.8%，已达 B 站阿瓦隆风控外全部公开可见极限）**。
 
 **验证爬取覆盖率：**
 ```bash
