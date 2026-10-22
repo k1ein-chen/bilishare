@@ -72,6 +72,10 @@ for old_f in glob.glob(os.path.join(chunks_dir, "chunk_*.txt")):
     os.remove(old_f)
 for old_r in glob.glob(os.path.join(results_dir, "chunk_*_result.json")):
     os.remove(old_r)
+for old_p in ("raw_points.json", "merged_points.json", "classified_llm.json"):
+    p_path = os.path.join(analysis_dir, old_p)
+    if os.path.exists(p_path):
+        os.remove(p_path)
 
 chunks_meta = []
 cur_items = []

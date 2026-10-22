@@ -118,7 +118,7 @@ python prepare_comments.py
 
 ---
 
-## 5. 步骤 D：情感分类与观点聚类
+## 5. 步骤 D：情感分类与观点聚类（9大主题 × 6大意图）
 
 ### 方式 1：Agent 免 API Key 指针切块模式（默认）
 由宿主 Agent（或并发 Subagent）读取 `comments/analysis/chunks/chunk_XX.txt`，合并同类观点后将短序号指针写入 `comments/analysis/results/chunk_XX_result.json`：
@@ -128,15 +128,17 @@ python prepare_comments.py
   "opinions": [
     {
       "sentiment": "negative",
-      "category": "性能优化",
-      "point": "更新后出现严重卡顿、掉帧及提示文件被篡改",
+      "category": "平衡数值",
+      "intent": "建言献策",
+      "point": "吐槽威龙实战强度垫底并呼吁优化喷气后摇",
       "indices": [1, 3, 14, 22, 45]
     }
   ]
 }
 ```
 - **情感极性 (`sentiment`)**：`positive`（好评）/ `neutral`（中评）/ `negative`（差评，含反讽）
-- **一级主题 (`category`)**：`性能优化`、`游戏性`、`运营活动`、`匹配/社交`、`国服对比`、`收费/氪金`、`画质/音效`、`期待/建议`、`其他`
+- **内容主题 (`category`，9 选 1)**：`视听剧情IP`、`平衡数值`、`玩法内容`、`技术Bug`、`商业化付费`、`运营服务`、`社区社交`、`赛事竞品`、`其他`
+- **用户意图 (`intent`，6 选 1)**：`表扬认可`、`玩梗传播`、`咨询考据`、`建言献策`、`吐槽宣泄`、`维权抵制`
 - **高赞红线**：带 `🔥` 标记（$\ge 10$ 赞）的评论必须 100% 归入 `opinions` 的 `indices` 中；无意义水评直接略过。
 
 ### 方式 2：外部 LLM API Key 模式（备选）
@@ -145,28 +147,31 @@ python prepare_comments.py
 export DEEPSEEK_API_KEY="sk-xxxxx"
 python llm_classifier.py
 ```
-`llm_classifier.py` 默认按 `BATCH_SIZE = 40`、`SLEEP_BETWEEN = 3s` 调用 DeepSeek API（或修改顶部 `API_URL` / `MODEL` 切换至火山引擎 Ark），直接生成 `classified_llm.json` 与 `llm_report.txt`。
 
 ---
 
-## 6. 步骤 E：生成报告
+## 6. 步骤 E：二级指针同义收敛与报告生成（`.md` & `.txt`）
 
-在 Agent 完成所有 `chunk_XX_result.json` 后运行：
-```bash
-python generate_report.py
-```
-
-### 6.1 自动产出
-```
-comments/analysis/
-├── classified_llm.json        ← 全量评论 + sentiment/category/point/is_water 标签
-└── llm_report.txt             ← 可读舆情报告（含统计 + 具体槽点 + 高赞原话引用）
-```
-
-### 6.2 报告包含内容
-- **总体概览**：实质观点评论 vs 日常互动水评占比，以及好评/中评/差评占比
-- **主题负面率排行与核心观点明细**：按一级主题统计好/中/差评率，并列出各主题下声量最高的二级具体观点（`point`）
-- **好评 / 差评 / 中评 高赞原话 Top 15**：按点赞数排序，附带原话、观点标签与视频来源
+1. **初次运行水化与高赞校验**：
+   ```bash
+   python generate_report.py
+   ```
+2. **二级指针全局收敛（当原子观点数 $> 30$ 时）**：
+   - 脚本自动导出无偏原子观点清单 `comments/analysis/raw_points.json`（编号 `P001 ~ Pn`）；
+   - 由主 Agent 单脑通读并归并为 20~40 个正交标准观点，写入 `comments/analysis/merged_points.json`，再次运行 `python generate_report.py`。
+3. **自动产出与标准报告模板**：
+   ```
+   comments/analysis/
+   ├── raw_points.json            ← 跨块原子观点清单 (P001 ~ Pn)
+   ├── merged_points.json         ← 二级同义收敛映射表
+   ├── classified_llm.json        ← 全量评论 + sentiment/category/intent/point/is_water 标签
+   ├── llm_report.md              ← 标准舆情报告 (Markdown 版)
+   └── llm_report.txt             ← 标准舆情报告 (纯文本版)
+   ```
+   最终报告严格遵循 [`report_template.md`](./report_template.md) 与 [`report_template.txt`](./report_template.txt) 的三段式结构：
+   - **`# 整体结论`**：双口径并列（全量口径主展示 + 实质口径参考）+ `**好评**` / `**差评**` / `**热门话题**`；
+   - **`# 评价观点明细`**：正/中/负 CAD 单句事实分点（无分类前缀，带精确条数 `（X条）`）；
+   - **`# 好中差评声量明细`**：入池总数、好评、中评（拆解实质中评与日常水评）、差评 100% 闭合对账。
 
 ---
 
@@ -214,13 +219,15 @@ comments/analysis/
 ```
 工作目录 = bilishare/
 
-核心规范与脚本：
-  SKILL.md                     ← Agent Skill 指针切块标准协议（主入口）
+核心规范、模板与脚本：
+  SKILL.md                     ← Agent Skill 指针切块与报告标准协议（主入口）
+  report_template.md           ← B站评论区舆情报告标准模板 (Markdown 版)
+  report_template.txt          ← B站评论区舆情报告标准模板 (纯文本版)
   CLAUDE.md                    ← Agent 引导说明
   batch_scraper.py             ← Step 1: 批量爬取评论（支持 --official）
   check_stats.py               ← Step 1+: 查看爬取覆盖率
   prepare_comments.py          ← Step 2: 合并评论并生成短序号切块
-  generate_report.py           ← Step 4: 指针还原、高赞校验与报告生成
+  generate_report.py           ← Step 4: 二级指针收敛、高赞校验与报告生成 (.md/.txt)
   llm_classifier.py            ← 备选: 外部 LLM API Key 批量分类
 
 运行时数据目录（自动创建）：
@@ -232,7 +239,10 @@ comments/analysis/
       all_comments_combined.json    ← 合并后的全量评论
       chunks/                       ← 短序号切块 chunk_XX.txt 与 manifest.json
       results/                      ← Agent 产出的 chunk_XX_result.json
+      raw_points.json               ← 跨切块原子观点清单 (P001 ~ Pn)
+      merged_points.json            ← 二级指针同义归并映射表
       classified_llm.json           ← 全量评论 + 分类标签最终底表
-      llm_report.txt                ← 最终可读舆情报告
+      llm_report.md                 ← 最终可读舆情报告 (Markdown 版)
+      llm_report.txt                ← 最终可读舆情报告 (纯文本版)
 ```
 

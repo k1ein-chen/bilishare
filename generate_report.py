@@ -29,15 +29,33 @@ results_dir = os.path.join(analysis_dir, "results")
 classified_llm_path = os.path.join(analysis_dir, "classified_llm.json")
 
 dedup = {}
-point_counter = defaultdict(lambda: Counter())  # category -> Counter({(sentiment, point): count})
+point_counter = defaultdict(lambda: Counter())  # category -> Counter({(sentiment, intent, point): count})
 missing_chunks = []
 
+def infer_default_intent(sentiment, category, point):
+    if any(k in point for k in ("暗改", "欺诈", "维权", "卸载", "退坑", "举报", "投诉", "12315")):
+        return "维权抵制"
+    if any(k in point for k in ("梗", "调侃", "整活", "笑", "賀生", "贺生", "祝福", "吸欧气", "打卡", "报到", "报道")):
+        return "玩梗传播"
+    if any(k in point for k in ("建议", "呼吁", "希望", "献策", "催更", "期待", "请求", "回调")):
+        return "建言献策"
+    if sentiment == "positive":
+        return "表扬认可"
+    if sentiment == "negative":
+        return "吐槽宣泄"
+    return "咨询考据"
+
 chunk_result_files = glob.glob(os.path.join(results_dir, "chunk_*_result.json"))
+raw_points_path = os.path.join(analysis_dir, "raw_points.json")
+merged_points_path = os.path.join(analysis_dir, "merged_points.json")
 
 # 2. 优先读取指针切块结果 (comments/analysis/results/chunk_*_result.json)
 if os.path.exists(manifest_path) and (chunk_result_files or not os.path.exists(classified_llm_path)):
     with open(manifest_path, "r", encoding="utf-8") as mf:
         manifest = json.load(mf)
+
+    atomic_key_to_pid = {}
+    atomic_points = {}  # pid -> {"pid", "category", "intent", "sentiment", "point", "gids": []}
 
     for chunk_info in manifest.get("chunks", []):
         cid_str = chunk_info["chunk_id"]
@@ -62,23 +80,30 @@ if os.path.exists(manifest_path) and (chunk_result_files or not os.path.exists(c
                 sentiment = "neutral"
             category = op.get("category") or op.get("topic") or "其他"
             point = (op.get("point") or op.get("sub_topic") or "").strip()
+            intent = (op.get("intent") or "").strip() or infer_default_intent(sentiment, category, point)
             indices = op.get("indices") or op.get("evidence_indices") or []
 
-            valid_hits = 0
+            matched_gids = []
             for loc_idx in indices:
                 global_id = local_map.get(str(loc_idx))
                 if global_id is not None and global_id in comment_map and global_id not in seen_in_chunk:
                     seen_in_chunk.add(global_id)
-                    dedup[global_id] = {
-                        "id": global_id,
-                        "sentiment": sentiment,
+                    matched_gids.append(global_id)
+
+            if point and matched_gids:
+                akey = (sentiment, category, point)
+                if akey not in atomic_key_to_pid:
+                    pid = f"P{len(atomic_key_to_pid) + 1:03d}"
+                    atomic_key_to_pid[akey] = pid
+                    atomic_points[pid] = {
+                        "pid": pid,
                         "category": category,
-                        "topic": category,
+                        "intent": intent,
+                        "sentiment": sentiment,
                         "point": point,
+                        "gids": [],
                     }
-                    valid_hits += 1
-            if point and valid_hits > 0:
-                point_counter[category][(sentiment, point)] += valid_hits
+                atomic_points[atomic_key_to_pid[akey]]["gids"].extend(matched_gids)
 
     if missing_chunks:
         print(
@@ -87,6 +112,87 @@ if os.path.exists(manifest_path) and (chunk_result_files or not os.path.exists(c
             file=sys.stderr,
         )
         sys.exit(2)
+
+    # 导出无偏原子观点清单 (隐去条数防大模型注意力偏见)
+    raw_points_export = [
+        {
+            "pid": item["pid"],
+            "category": item["category"],
+            "intent": item["intent"],
+            "sentiment": item["sentiment"],
+            "point": item["point"],
+        }
+        for item in atomic_points.values()
+    ]
+    with open(raw_points_path, "w", encoding="utf-8") as rpf:
+        json.dump(raw_points_export, rpf, ensure_ascii=False, indent=2)
+
+    # 检测是否存在二级同义归并表 merged_points.json
+    pid_override = {}
+    if os.path.exists(merged_points_path):
+        try:
+            with open(merged_points_path, "r", encoding="utf-8") as mpf:
+                merged_data = json.load(mpf)
+            merged_list = merged_data.get("merged_opinions", merged_data) if isinstance(merged_data, dict) else merged_data
+        except Exception as e:
+            print(f"[ERROR] 二次归并文件 JSON 格式损坏: comments/analysis/merged_points.json ({e})", file=sys.stderr)
+            sys.exit(1)
+
+        seen_pids = set()
+        for m_op in merged_list:
+            m_cat = m_op.get("category") or "其他"
+            m_sent = m_op.get("sentiment") or "neutral"
+            if m_sent not in ("positive", "neutral", "negative"):
+                m_sent = "neutral"
+            m_pt = (m_op.get("point") or "").strip()
+            m_intent = (m_op.get("intent") or "").strip() or infer_default_intent(m_sent, m_cat, m_pt)
+            for pid in m_op.get("pids", []):
+                if pid in atomic_points and pid not in seen_pids:
+                    seen_pids.add(pid)
+                    pid_override[pid] = {
+                        "category": m_cat,
+                        "intent": m_intent,
+                        "sentiment": m_sent,
+                        "point": m_pt,
+                    }
+
+        uncovered_pids = [p for p in atomic_points if p not in seen_pids]
+        if uncovered_pids:
+            print(
+                f"[WARN] merged_points.json 遗漏了 {len(uncovered_pids)} 个原子编号 ({', '.join(uncovered_pids[:8])}...)，已自动保留其原始归类确保 100% 守恒。",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"[INFO] 已加载 merged_points.json：将 {len(atomic_points)} 个跨块原子观点 100% 无损收敛为 {len(merged_list)} 个标准观点。",
+                file=sys.stderr,
+            )
+    elif len(atomic_points) > 30:
+        print(
+            f"[INFO] 当前共有 {len(atomic_points)} 个跨切块原子观点（已导出至 comments/analysis/raw_points.json）。\n"
+            f"       如需消除跨块同义词发散，请将其归并输出至 comments/analysis/merged_points.json 后重跑本脚本。",
+            file=sys.stderr,
+        )
+
+    # 水化映射回底层评论 ID
+    for pid, info in atomic_points.items():
+        final_meta = pid_override.get(pid, info)
+        cat = final_meta["category"]
+        intent = final_meta["intent"]
+        sent = final_meta["sentiment"]
+        pt = final_meta["point"]
+        gids = info["gids"]
+        for gid in gids:
+            dedup[gid] = {
+                "id": gid,
+                "sentiment": sent,
+                "category": cat,
+                "topic": cat,
+                "intent": intent,
+                "point": pt,
+            }
+        if pt and gids:
+            point_counter[cat][(sent, intent, pt)] += len(gids)
 
     # 高赞防漏校验：检查点赞 >= 10 的评论是否被遗漏
     uncovered_high_likes = []
@@ -109,16 +215,19 @@ elif os.path.exists(classified_llm_path):
         cid = c.get("id")
         if cid is not None and not c.get("is_water", False):
             cat = c.get("category") or c.get("topic") or "其他"
+            sent = c.get("sentiment", "neutral")
             pt = c.get("point", "")
+            intent = c.get("intent") or infer_default_intent(sent, cat, pt)
             dedup[cid] = {
                 "id": cid,
-                "sentiment": c.get("sentiment", "neutral"),
+                "sentiment": sent,
                 "category": cat,
                 "topic": cat,
+                "intent": intent,
                 "point": pt,
             }
             if pt:
-                point_counter[cat][(c.get("sentiment", "neutral"), pt)] += 1
+                point_counter[cat][(sent, intent, pt)] += 1
 else:
     print(
         "[ERROR] 未找到切块文件或分类结果，请先运行 python prepare_comments.py 并完成切块分析。",
@@ -138,7 +247,7 @@ for c in comments:
         enriched.append(item)
         substantive_comments.append(item)
     else:
-        item = {**c, "sentiment": "neutral", "category": "日常互动/水评", "topic": "日常互动/水评", "point": "", "is_water": True}
+        item = {**c, "sentiment": "neutral", "category": "日常互动/水评", "topic": "日常互动/水评", "intent": "日常水评", "point": "", "is_water": True}
         enriched.append(item)
         water_comments.append(item)
 
@@ -150,78 +259,95 @@ neg = [x for x in enriched if x["sentiment"] == "negative"]
 sub_total = len(substantive_comments) or 1
 all_total = total_comments or 1
 
-# 4. 统计主题分布（仅统计实质评论）
+# 4. 统计主题与意图分布（仅统计实质评论）
 topic_dist = Counter()
+intent_dist = Counter()
 sentiment_topic = defaultdict(lambda: Counter())
 for c in substantive_comments:
     t = c.get("topic", "其他")
+    it = c.get("intent", "咨询考据")
     s = c.get("sentiment", "neutral")
     topic_dist[t] += 1
+    intent_dist[it] += 1
     sentiment_topic[s][t] += 1
 
-# 5. 生成可读报告
+# 5. 生成可读报告（BiliShare 标准版）
 lines = []
 def w(s=""):
     lines.append(s)
 
-w("B站评论区情感与观点分析报告")
-w("=" * 55)
-w(f"总评论数: {total_comments}")
-w(f"  ├─ 实质观点评论: {len(substantive_comments)} ({len(substantive_comments)/all_total*100:.1f}%)")
-w(f"  └─ 日常互动/水评: {len(water_comments)} ({len(water_comments)/all_total*100:.1f}%)")
+main_cnt = sum(1 for c in comments if not c.get("is_sub_reply", False))
+sub_reply_cnt = total_comments - main_cnt
+
+pct_pos_all = len(pos) / all_total * 100
+pct_neu_all = len(neu_all) / all_total * 100
+pct_neg_all = len(neg) / all_total * 100
+pct_non_neg_all = 100.0 - pct_neg_all
+
+pct_pos_sub = len(pos) / sub_total * 100
+pct_neu_sub = len(neu_sub) / sub_total * 100
+pct_neg_sub = len(neg) / sub_total * 100
+pct_non_neg_sub = 100.0 - pct_neg_sub
+
+w("# B站评论区舆情分析报告")
 w()
-w("【情感占比（以实质观点评论为分母）】")
-w(f"  👍 好评: {len(pos):>4} ({len(pos)/sub_total*100:.1f}%)  [占全量 {len(pos)/all_total*100:.1f}%]")
-w(f"  ➖ 中评: {len(neu_sub):>4} ({len(neu_sub)/sub_total*100:.1f}%)  [含水评广义中立占全量 {len(neu_all)/all_total*100:.1f}%]")
-w(f"  👎 差评: {len(neg):>4} ({len(neg)/sub_total*100:.1f}%)  [占全量 {len(neg)/all_total*100:.1f}%]")
-w("=" * 55)
+w("# 整体结论")
+w(f"本期纳入分析有效评论 {total_comments} 条（含实质观点评论 {len(substantive_comments)} 条、日常互动与水评 {len(water_comments)} 条），评论区整体舆情以正面/中性/负面为主：")
+w(f"- 全量口径（含水评归入广义中立）：好评 {pct_pos_all:.0f}%（{pct_pos_all:.1f}%）、中评 {pct_neu_all:.0f}%（{pct_neu_all:.1f}%）、差评 {pct_neg_all:.0f}%（{pct_neg_all:.1f}%），非负评价 {pct_non_neg_all:.0f}%（{pct_non_neg_all:.1f}%）；")
+w(f"- 实质口径（仅以实质观点评论为分母）：好评 {pct_pos_sub:.0f}%（{pct_pos_sub:.1f}%）、中评 {pct_neu_sub:.0f}%（{pct_neu_sub:.1f}%）、差评 {pct_neg_sub:.0f}%（{pct_neg_sub:.1f}%），非负评价 {pct_non_neg_sub:.0f}%（{pct_non_neg_sub:.1f}%）。")
+w()
+w("**好评**：【请根据下方正面观点简要汇总核心正向认可点】")
+w("**差评**：【请根据下方负面观点简要汇总核心吐槽点】")
+w("**热门话题**：【请用1个短段落概括高声量讨论话题、玩梗方向与主要诉求】")
 w()
 
-w("=== 主题负面率排行与核心观点明细 ===")
-if not topic_dist:
-    w("  （当前无实质观点评论）")
-for topic, count in topic_dist.most_common(12):
-    pct_neg = sentiment_topic["negative"][topic] / count * 100
-    pct_pos = sentiment_topic["positive"][topic] / count * 100
-    pct_neu = sentiment_topic["neutral"][topic] / count * 100
-    bar = "🔴" if pct_neg > 50 else ("🟡" if pct_neg > 20 else "🟢")
-    w(f"\n{bar} 【{topic}】 共 {count} 条 (占实质评论 {count/sub_total*100:.1f}% | 好评{pct_pos:.0f}% / 中评{pct_neu:.0f}% / 差评{pct_neg:.0f}%)")
-    if topic in point_counter:
-        for (s_label, pt), pt_cnt in point_counter[topic].most_common(6):
-            s_icon = "👍" if s_label == "positive" else ("👎" if s_label == "negative" else "➖")
-            w(f"    • {s_icon} [{pt_cnt}条] {pt}")
+# 按正/中/负归集所有观点
+sentiment_points = defaultdict(Counter)
+for cat, cnt_map in point_counter.items():
+    for (s_label, it_label, pt), pt_cnt in cnt_map.items():
+        sentiment_points[s_label][pt] += pt_cnt
 
+w("# 评价观点明细")
+w(
+    f"本期主评与楼中楼子回复总数为 {total_comments} 条（实质观点 {len(substantive_comments)} 条、日常水评 {len(water_comments)} 条），"
+    f"全量口径好评 {pct_pos_all:.0f}%、中评 {pct_neu_all:.0f}%、差评 {pct_neg_all:.0f}%"
+    f"（实质口径好评 {pct_pos_sub:.1f}%、中评 {pct_neu_sub:.1f}%、差评 {pct_neg_sub:.1f}%）"
+)
 w()
-for label, c_list, icon in [("好评", pos, "👍"), ("差评", neg, "👎"), ("中评", neu_sub, "➖")]:
-    w(f"\n=== {icon} {label}高赞原话 Top 15 ===")
-    sorted_list = sorted(c_list, key=lambda x: x.get("like", 0), reverse=True)
-    for c in sorted_list[:15]:
-        likes = c.get("like", 0)
-        topic = c.get("topic", "")
-        pt = c.get("point", "")
-        tag = f"{topic}·{pt[:18]}" if pt else topic
-        text = c.get("text", "").replace("\r", " ").replace("\n", " ")
-        src = c.get("source_title", "")[:30]
-        src_label = "官方" if c.get("source_label") == "official" else "玩家"
-        w(f"[{likes}赞][{tag}] {text[:140]}")
-        w(f"  -> 来源({src_label}): {src}")
-        w()
+w("-正面观点集中在：")
+for idx, (pt, cnt) in enumerate(sentiment_points["positive"].most_common(), 1):
+    w(f"{idx}. {pt}（{cnt}条）")
+w()
+w("-中性观点集中为：")
+for idx, (pt, cnt) in enumerate(sentiment_points["neutral"].most_common(), 1):
+    w(f"{idx}. {pt}（{cnt}条）")
+w()
+w("-负面观点集中为：")
+for idx, (pt, cnt) in enumerate(sentiment_points["negative"].most_common(), 1):
+    w(f"{idx}. {pt}（{cnt}条）")
+w()
 
-report_text = "\n".join(lines)
+w("# 好中差评声量明细")
+w(f"- 舆情总数：{total_comments} 条（主评论 {main_cnt} 条、子回复 {sub_reply_cnt} 条）")
+w(f"- 好评：{len(pos)} 条")
+w(f"- 中评：{len(neu_all)} 条（含实质中评 {len(neu_sub)} 条、日常互动与水评 {len(water_comments)} 条）")
+w(f"- 差评：{len(neg)} 条")
 
-out_report_path = os.path.join(analysis_dir, "llm_report.txt")
-with open(out_report_path, "w", encoding="utf-8") as f:
-    f.write(report_text)
+report_text = "\n".join(lines) + "\n"
+
+for ext in ("txt", "md"):
+    out_report_path = os.path.join(analysis_dir, f"llm_report.{ext}")
+    with open(out_report_path, "w", encoding="utf-8") as f:
+        f.write(report_text)
 
 with open(classified_llm_path, "w", encoding="utf-8") as f:
     json.dump(enriched, f, ensure_ascii=False, indent=2)
 
-print(f"Report saved to comments/analysis/llm_report.txt", file=sys.stderr)
+print("Report saved to comments/analysis/llm_report.md & comments/analysis/llm_report.txt", file=sys.stderr)
 print(
     f"Total: {total_comments} (实质: {len(substantive_comments)}, 水评: {len(water_comments)}) | "
-    f"好评: {len(pos)} ({len(pos)/sub_total*100:.1f}%) | "
-    f"中评: {len(neu_sub)} ({len(neu_sub)/sub_total*100:.1f}%) | "
-    f"差评: {len(neg)} ({len(neg)/sub_total*100:.1f}%)",
+    f"全量口径 好/中/差: {pct_pos_all:.1f}%/{pct_neu_all:.1f}%/{pct_neg_all:.1f}% | "
+    f"实质口径 好/中/差: {pct_pos_sub:.1f}%/{pct_neu_sub:.1f}%/{pct_neg_sub:.1f}%",
     file=sys.stderr,
 )
 

@@ -120,33 +120,33 @@ python prepare_comments.py
 - **方式 A（推荐，免 API Key）**：由宿主 Agent（WorkBuddy / Claude Code / Antigravity）按 [`SKILL.md`](./SKILL.md) 规范读取 `comments/analysis/chunks/chunk_*.txt`，合并同类观点输出局部序号数组至 `comments/analysis/results/chunk_XX_result.json`。
 - **方式 B（备选，外部 API Key）**：运行 `python llm_classifier.py` 调用外部 DeepSeek / 火山引擎 API 逐批分类。
 
-**分类规则：**
+**分类体系（9 大内容主题 × 6 大用户意图）：**
 
-| 分类 | 定义 | 示例 |
-|:---:|:---|:---|
-| 👍 好评 | 表达喜欢、满意、称赞、推荐 | "红名可太好了，国际服已经搞不好了" |
-| ➖ 中评 | 客观讨论、提问、建议、一般反馈 | "问下这个配置够不够" |
-| 👎 差评 | 批评、不满、吐槽bug/卡顿/服务器 | "一小时了都没进去" |
+- **情感极性 (`sentiment`)**：`positive`（好评） / `neutral`（中评） / `negative`（差评，含反讽）
+- **内容主题 (`category`，9 选 1)**：`视听剧情IP`、`平衡数值`、`玩法内容`、`技术Bug`、`商业化付费`、`运营服务`、`社区社交`、`赛事竞品`、`其他`
+- **用户意图 (`intent`，6 选 1)**：`表扬认可`、`玩梗传播`、`咨询考据`、`建言献策`、`吐槽宣泄`、`维权抵制`
 
-**一级主题（9 大固定分类）：** `性能优化`、`游戏性`、`运营活动`、`匹配/社交`、`国服对比`、`收费/氪金`、`画质/音效`、`期待/建议`、`其他`
-
-### Step 4：生成并查看报告
+### Step 4：二级指针同义收敛与生成报告（`.md` & `.txt`）
 
 ```bash
 python generate_report.py
 ```
 
-自动生成：
+- 当跨切块原子观点数 $> 30$ 时，脚本自动导出 `comments/analysis/raw_points.json`（编号 `P001 ~ Pn`）；由主 Agent 单脑将其归并为 20~40 个正交标准观点写入 `comments/analysis/merged_points.json` 后重跑 `python generate_report.py`。
+- 自动生成（遵循 [`report_template.md`](./report_template.md) 与 [`report_template.txt`](./report_template.txt)）：
 ```
 comments/analysis/
-├── classified_llm.json        ← 全量数据 + 每条评论的 sentiment/category/point 标签
-└── llm_report.txt             ← 可读舆情报告
+├── raw_points.json            ← 跨切块原子观点清单 (P001 ~ Pn)
+├── merged_points.json         ← 二级指针同义收敛映射表
+├── classified_llm.json        ← 全量数据 + 每条评论的 sentiment/category/intent/point 标签
+├── llm_report.md              ← 标准可读舆情报告 (Markdown 版)
+└── llm_report.txt             ← 标准可读舆情报告 (纯文本版)
 ```
 
-报告包含：
-- **总体概览**：实质观点评论 vs 日常互动水评占比，以及好评/中评/差评占比
-- **主题负面率排行与核心观点明细**：按主题统计好评/差评率，并列出每个主题下的具体槽点（`point`）与条数
-- **好评 / 差评 / 中评 高赞原话 Top 15**：按点赞排序 + 原话引用 + 视频来源
+报告包含三大标准模块：
+- **`# 整体结论`**：双口径并列（全量口径主展示 + 实质口径参考）及 `**好评**` / `**差评**` / `**热门话题**` 三段综述
+- **`# 评价观点明细`**：正 / 中 / 负 CAD 单句事实分点与精确条数 `（X条）`
+- **`# 好中差评声量明细`**：入池总数、好评、中评（拆解实质中评与日常水评）、差评 100% 闭合对账
 
 ---
 
@@ -191,12 +191,14 @@ MODEL = "deepseek-v4-flash"
 
 ```
 bilishare/
-├── SKILL.md                       ← Agent Skill 指针切块协议规范（主入口）
+├── SKILL.md                       ← Agent Skill 指针切块与报告协议规范（主入口）
+├── report_template.md             ← B站评论区舆情报告标准模板 (Markdown 版)
+├── report_template.txt            ← B站评论区舆情报告标准模板 (纯文本版)
 ├── CLAUDE.md                      ← Agent 引导说明
-├── batch_scraper.py               ← ① 批量爬取评论（支持 --official）
+├── batch_scraper.py               ← ① 批量爬取评论（WBI + Legacy 双引擎）
 ├── check_stats.py                 ← 验证爬取覆盖率
 ├── prepare_comments.py            ← ② 合并数据并生成 300条/块 短序号切块
-├── generate_report.py             ← ④ 指针还原、高赞防漏校验与生成报告
+├── generate_report.py             ← ④ 二级指针还原、高赞校验与生成报告 (.md/.txt)
 ├── llm_classifier.py              ← （可选）使用外部 API Key 逐批分类
 ├── README.md                      ← 本文档
 ├── SOP_B站评论抓取与分析.md        ← 详细 SOP + 异常排查索引
@@ -208,7 +210,10 @@ bilishare/
         ├── all_comments_combined.json
         ├── chunks/                ← 短序号切块 chunk_XX.txt 与 manifest.json
         ├── results/               ← Agent 输出的 chunk_XX_result.json
+        ├── raw_points.json        ← 跨块原子观点清单 (P001 ~ Pn)
+        ├── merged_points.json     ← 二级指针同义收敛映射表
         ├── classified_llm.json
+        ├── llm_report.md
         └── llm_report.txt
 ```
 

@@ -1,0 +1,7 @@
+comments/
+__pycache__/
+*.pyc
+.env
+cookie.txt
+HANDOVER_*.md
+docs/handovers/
